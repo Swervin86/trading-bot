@@ -1,22 +1,35 @@
 import time
+import os
 import oandapyV20
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.trades as trades
-import oandapyV20.endpoints.pricing as pricing
 import oandapyV20.endpoints.instruments as instruments
+import oandapyV20.endpoints.pricing as pricing
 import pandas as pd
 import numpy as np
 
 # --- CONFIG ---
-API_TOKEN = "7f014926e6a543bdef99b2a6388e737c-6c3750df280b051f44143f0ddad6897d"
+API_TOKEN = os.environ.get("OANDA_TOKEN", "")
 ACCOUNT_ID = "101-001-39455957-001"
 ENVIRONMENT = "practice"
 INSTRUMENT = "EUR_USD"
 UNITS = 10000
 CANDLE_COUNT = 50
 GRANULARITY = "M5"
+STOP_LOSS_PIPS = 15    # stop loss: 15 pips
+TAKE_PROFIT_PIPS = 30  # take profit: 30 pips (2:1 reward/risk)
+PIP = 0.0001
 
 client = oandapyV20.API(access_token=API_TOKEN, environment=ENVIRONMENT)
+
+def get_current_price():
+    params = {"instruments": INSTRUMENT}
+    r = pricing.PricingInfo(ACCOUNT_ID, params=params)
+    client.request(r)
+    price = r.response["prices"][0]
+    bid = float(price["bids"][0]["price"])
+    ask = float(price["asks"][0]["price"])
+    return bid, ask
 
 def get_candles():
     params = {"count": CANDLE_COUNT, "granularity": GRANULARITY}
@@ -59,22 +72,39 @@ def close_all_trades():
         print(f"Closed trade {trade['id']}")
 
 def place_order(units):
+    bid, ask = get_current_price()
+    if units > 0:  # BUY
+        entry = ask
+        sl = round(entry - STOP_LOSS_PIPS * PIP, 5)
+        tp = round(entry + TAKE_PROFIT_PIPS * PIP, 5)
+    else:  # SELL
+        entry = bid
+        sl = round(entry + STOP_LOSS_PIPS * PIP, 5)
+        tp = round(entry - TAKE_PROFIT_PIPS * PIP, 5)
+
     data = {
         "order": {
             "type": "MARKET",
             "instrument": INSTRUMENT,
             "units": str(units),
             "timeInForce": "FOK",
-            "positionFill": "DEFAULT"
+            "positionFill": "DEFAULT",
+            "stopLossOnFill": {"price": str(sl)},
+            "takeProfitOnFill": {"price": str(tp)}
         }
     }
     r = orders.Orders(ACCOUNT_ID, data=data)
     client.request(r)
-    print(f"Order placed: {units} units of {INSTRUMENT}")
+    print(f"Order placed: {units} units | SL: {sl} | TP: {tp}")
 
 def run():
+    if not API_TOKEN:
+        print("ERROR: OANDA_TOKEN environment variable not set.")
+        return
+
     print("Bot started. Trading EUR/USD on 5-minute candles.")
     print(f"Account: {ACCOUNT_ID}")
+    print(f"Stop loss: {STOP_LOSS_PIPS} pips | Take profit: {TAKE_PROFIT_PIPS} pips")
     print("-" * 40)
 
     while True:
