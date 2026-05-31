@@ -12,18 +12,19 @@ import numpy as np
 API_TOKEN = os.environ.get("OANDA_TOKEN", "")
 ACCOUNT_ID = "101-001-39455957-001"
 ENVIRONMENT = "practice"
-INSTRUMENT = "EUR_USD"
+INSTRUMENTS = ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF"]
 UNITS = 10000
 CANDLE_COUNT = 50
-GRANULARITY = "M5"
-STOP_LOSS_PIPS = 15    # stop loss: 15 pips
-TAKE_PROFIT_PIPS = 30  # take profit: 30 pips (2:1 reward/risk)
+GRANULARITY = "M1"
+STOP_LOSS_PIPS = 15
+TAKE_PROFIT_PIPS = 30
 PIP = 0.0001
+JPY_PIP = 0.01  # JPY pairs use a different pip size
 
 client = oandapyV20.API(access_token=API_TOKEN, environment=ENVIRONMENT)
 
-def get_current_price():
-    params = {"instruments": INSTRUMENT}
+def get_current_price(instrument):
+    params = {"instruments": instrument}
     r = pricing.PricingInfo(ACCOUNT_ID, params=params)
     client.request(r)
     price = r.response["prices"][0]
@@ -31,9 +32,9 @@ def get_current_price():
     ask = float(price["asks"][0]["price"])
     return bid, ask
 
-def get_candles():
+def get_candles(instrument):
     params = {"count": CANDLE_COUNT, "granularity": GRANULARITY}
-    r = instruments.InstrumentsCandles(INSTRUMENT, params=params)
+    r = instruments.InstrumentsCandles(instrument, params=params)
     client.request(r)
     candles = r.response["candles"]
     closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
@@ -71,21 +72,22 @@ def close_all_trades():
         client.request(r)
         print(f"Closed trade {trade['id']}")
 
-def place_order(units):
-    bid, ask = get_current_price()
+def place_order(instrument, units):
+    bid, ask = get_current_price(instrument)
+    pip = JPY_PIP if "JPY" in instrument else PIP
     if units > 0:  # BUY
         entry = ask
-        sl = round(entry - STOP_LOSS_PIPS * PIP, 5)
-        tp = round(entry + TAKE_PROFIT_PIPS * PIP, 5)
+        sl = round(entry - STOP_LOSS_PIPS * pip, 5)
+        tp = round(entry + TAKE_PROFIT_PIPS * pip, 5)
     else:  # SELL
         entry = bid
-        sl = round(entry + STOP_LOSS_PIPS * PIP, 5)
-        tp = round(entry - TAKE_PROFIT_PIPS * PIP, 5)
+        sl = round(entry + STOP_LOSS_PIPS * pip, 5)
+        tp = round(entry - TAKE_PROFIT_PIPS * pip, 5)
 
     data = {
         "order": {
             "type": "MARKET",
-            "instrument": INSTRUMENT,
+            "instrument": instrument,
             "units": str(units),
             "timeInForce": "FOK",
             "positionFill": "DEFAULT",
@@ -95,48 +97,52 @@ def place_order(units):
     }
     r = orders.Orders(ACCOUNT_ID, data=data)
     client.request(r)
-    print(f"Order placed: {units} units | SL: {sl} | TP: {tp}")
+    print(f"[{instrument}] Order placed: {units} units | SL: {sl} | TP: {tp}")
+
+def trade_instrument(instrument):
+    closes = get_candles(instrument)
+    current_rsi = rsi(closes)
+    current_macd = macd(closes)
+
+    print(f"[{instrument}] RSI: {current_rsi:.2f} | MACD: {current_macd:.6f}")
+
+    open_trades = get_open_trades()
+    instrument_trades = [t for t in open_trades if t["instrument"] == instrument]
+
+    if current_rsi < 30 and current_macd > 0:
+        if not instrument_trades:
+            print(f"[{instrument}] Signal: BUY")
+            place_order(instrument, UNITS)
+        elif instrument_trades[0]["currentUnits"].startswith("-"):
+            close_all_trades()
+            place_order(instrument, UNITS)
+
+    elif current_rsi > 70 and current_macd < 0:
+        if not instrument_trades:
+            print(f"[{instrument}] Signal: SELL")
+            place_order(instrument, -UNITS)
+        elif not instrument_trades[0]["currentUnits"].startswith("-"):
+            close_all_trades()
+            place_order(instrument, -UNITS)
+
+    else:
+        print(f"[{instrument}] No signal — holding")
 
 def run():
     if not API_TOKEN:
         print("ERROR: OANDA_TOKEN environment variable not set.")
         return
 
-    print("Bot started. Trading EUR/USD on 5-minute candles.")
+    print(f"Bot started. Trading {', '.join(INSTRUMENTS)} on 1-minute candles.")
     print(f"Account: {ACCOUNT_ID}")
     print(f"Stop loss: {STOP_LOSS_PIPS} pips | Take profit: {TAKE_PROFIT_PIPS} pips")
     print("-" * 40)
 
     while True:
         try:
-            closes = get_candles()
-            current_rsi = rsi(closes)
-            current_macd = macd(closes)
-
-            print(f"RSI: {current_rsi:.2f} | MACD: {current_macd:.6f}")
-
-            open_trades = get_open_trades()
-
-            if current_rsi < 30 and current_macd > 0:
-                if not open_trades:
-                    print("Signal: BUY")
-                    place_order(UNITS)
-                elif open_trades[0]["currentUnits"].startswith("-"):
-                    close_all_trades()
-                    place_order(UNITS)
-
-            elif current_rsi > 70 and current_macd < 0:
-                if not open_trades:
-                    print("Signal: SELL")
-                    place_order(-UNITS)
-                elif not open_trades[0]["currentUnits"].startswith("-"):
-                    close_all_trades()
-                    place_order(-UNITS)
-
-            else:
-                print("No signal — holding")
-
-            time.sleep(30)
+            for instrument in INSTRUMENTS:
+                trade_instrument(instrument)
+            time.sleep(60)
 
         except Exception as e:
             print(f"Error: {e}")
